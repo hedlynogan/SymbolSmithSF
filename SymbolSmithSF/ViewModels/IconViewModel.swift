@@ -22,7 +22,7 @@ final class IconViewModel {
     var configuration = IconConfiguration()
 
     /// Recently used symbols
-    var recentSymbols: [String] = ["star.fill", "heart.fill", "bolt.fill", "cloud.fill"]
+    var recentSymbols: [String] = ["wand.and.sparkles", "star.fill", "heart.fill", "bolt.fill"]
 
     /// Common/featured symbols to show by default (SF Symbols 7 compatible)
     let commonSymbols = [

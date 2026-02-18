@@ -13,7 +13,7 @@ final class IconConfiguration {
     // MARK: - SF Symbol Properties
 
     /// SF Symbol name (e.g., "star.fill")
-    var symbolName: String = "star.fill"
+    var symbolName: String = "wand.and.sparkles"
 
     /// Symbol color
     var symbolColor: Color = .white
@@ -36,10 +36,10 @@ final class IconConfiguration {
     var backgroundType: BackgroundType = .gradient
 
     /// Primary background color (or solid color if backgroundType is .solid)
-    var primaryColor: Color = Color(red: 1.0, green: 149/255, blue: 0.0) // #FF9500
+    var primaryColor: Color = Color(red: 0.0, green: 122/255, blue: 1.0) // #007AFF iOS blue
 
     /// Secondary background color for gradient
-    var secondaryColor: Color = Color(red: 1.0, green: 200/255, blue: 0.0) // #FFC800
+    var secondaryColor: Color = Color(red: 0.0, green: 199/255, blue: 1.0) // #00C7FF light blue
 
     /// Gradient angle (default: top to bottom)
     var gradientAngle: Angle = .degrees(180)
