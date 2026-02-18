@@ -67,7 +67,11 @@ struct SymbolPickerView: View {
                         Text(mode.rawValue).tag(mode)
                     }
                 }
+                #if os(macOS)
                 .pickerStyle(.radioGroup)
+                #else
+                .pickerStyle(.menu)
+                #endif
                 .labelsHidden()
             }
 

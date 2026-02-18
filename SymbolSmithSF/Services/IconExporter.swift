@@ -6,8 +6,12 @@
 //
 
 import SwiftUI
-import AppKit
 import UniformTypeIdentifiers
+#if os(macOS)
+import AppKit
+#else
+import UIKit
+#endif
 
 /// Renders and exports app icons to PNG files with Contents.json
 final class IconExporter {
@@ -68,10 +72,12 @@ final class IconExporter {
 
         // Render and save each size
         for iconSize in sizes {
-            let image = renderIcon(configuration: configuration, size: iconSize.size)
+            let pngData = try renderIconAsPNGData(configuration: configuration, size: iconSize.size)
             let fileURL = appiconsetURL.appendingPathComponent(iconSize.filename)
 
-            guard savePNG(image: image, to: fileURL) else {
+            do {
+                try pngData.write(to: fileURL)
+            } catch {
                 throw ExportError.fileWriteFailed(iconSize.filename)
             }
         }
@@ -86,20 +92,29 @@ final class IconExporter {
         configuration: IconConfiguration,
         to destinationURL: URL
     ) throws {
-        let image = renderIcon(configuration: configuration, size: CGSize(width: 1024, height: 1024))
-
-        guard savePNG(image: image, to: destinationURL) else {
-            throw ExportError.fileWriteFailed(destinationURL.lastPathComponent)
-        }
+        let pngData = try renderIconAsPNGData(
+            configuration: configuration,
+            size: CGSize(width: 1024, height: 1024)
+        )
+        try pngData.write(to: destinationURL)
     }
 
     // MARK: - Rendering
 
-    /// Renders an icon at the specified size
-    func renderIcon(configuration: IconConfiguration, size: CGSize) -> NSImage {
-        print("🎨 Rendering icon at size: \(size)")
-        
-        // Create bitmap representation with explicit scale of 1.0 to avoid Retina 2x scaling
+    /// Renders an icon at the specified size and returns PNG data.
+    /// Uses AppKit on macOS and UIKit on iOS/iPadOS/visionOS.
+    func renderIconAsPNGData(configuration: IconConfiguration, size: CGSize) throws -> Data {
+        #if os(macOS)
+        return try renderIconMacOS(configuration: configuration, size: size)
+        #else
+        return try renderIconUIKit(configuration: configuration, size: size)
+        #endif
+    }
+
+    // MARK: - macOS Rendering
+
+    #if os(macOS)
+    private func renderIconMacOS(configuration: IconConfiguration, size: CGSize) throws -> Data {
         guard let bitmapRep = NSBitmapImageRep(
             bitmapDataPlanes: nil,
             pixelsWide: Int(size.width),
@@ -112,95 +127,42 @@ final class IconExporter {
             bytesPerRow: 0,
             bitsPerPixel: 0
         ) else {
-            print("❌ Failed to create bitmap representation")
-            return NSImage(size: size)
+            throw ExportError.renderingFailed
         }
-        
-        print("✅ Created bitmap: \(bitmapRep.pixelsWide)x\(bitmapRep.pixelsHigh)")
-        
-        // Draw directly into the bitmap context instead of using NSImage lockFocus
+
         NSGraphicsContext.saveGraphicsState()
-        let context = NSGraphicsContext(bitmapImageRep: bitmapRep)
-        NSGraphicsContext.current = context
-        
-        guard let cgContext = context?.cgContext else {
+        let graphicsContext = NSGraphicsContext(bitmapImageRep: bitmapRep)
+        NSGraphicsContext.current = graphicsContext
+
+        guard let cgContext = graphicsContext?.cgContext else {
             NSGraphicsContext.restoreGraphicsState()
-            let image = NSImage(size: size)
-            image.addRepresentation(bitmapRep)
-            return image
+            throw ExportError.renderingFailed
         }
 
         let rect = CGRect(origin: .zero, size: size)
-
-        // 1. Draw background
         drawBackground(configuration: configuration, in: rect, context: cgContext)
-
-        // 2. Draw symbol
-        drawSymbol(configuration: configuration, in: rect, size: size)
+        drawSymbolMacOS(configuration: configuration, in: rect, size: size)
 
         NSGraphicsContext.restoreGraphicsState()
-        
-        // Create NSImage and add our bitmap representation
-        let image = NSImage(size: size)
-        image.addRepresentation(bitmapRep)
 
-        return image
-    }
-
-    // MARK: - Private Drawing Methods
-
-    private func drawBackground(configuration: IconConfiguration, in rect: CGRect, context: CGContext) {
-        context.saveGState()
-
-        switch configuration.backgroundType {
-        case .solid:
-            // Draw solid color
-            NSColor(configuration.primaryColor).setFill()
-            context.fill(rect)
-
-        case .gradient:
-            // Draw gradient
-            let colorSpace = CGColorSpaceCreateDeviceRGB()
-            let colors = [
-                configuration.primaryColor.cgColor,
-                configuration.secondaryColor.cgColor
-            ] as CFArray
-
-            guard let gradient = CGGradient(colorsSpace: colorSpace, colors: colors, locations: [0.0, 1.0]) else {
-                return
-            }
-
-            // Calculate gradient start and end points based on angle
-            let (startPoint, endPoint) = gradientPoints(for: configuration.gradientAngle, in: rect)
-
-            context.drawLinearGradient(
-                gradient,
-                start: startPoint,
-                end: endPoint,
-                options: [.drawsBeforeStartLocation, .drawsAfterEndLocation]
-            )
+        guard let pngData = bitmapRep.representation(using: .png, properties: [:]) else {
+            throw ExportError.renderingFailed
         }
-
-        context.restoreGState()
+        return pngData
     }
 
-    private func drawSymbol(configuration: IconConfiguration, in rect: CGRect, size: CGSize) {
-        // Get the symbol image
+    private func drawSymbolMacOS(configuration: IconConfiguration, in rect: CGRect, size: CGSize) {
         guard let symbolImage = NSImage(
             systemSymbolName: configuration.symbolName,
             accessibilityDescription: nil
-        ) else {
-            return
-        }
+        ) else { return }
 
-        // Configure symbol appearance
         let pointSize = size.width * configuration.symbolScale
         let symbolConfig = NSImage.SymbolConfiguration(
             pointSize: pointSize,
             weight: nsWeight(from: configuration.symbolWeight)
         )
 
-        // Apply color based on rendering mode
         let colorConfig: NSImage.SymbolConfiguration
         switch configuration.renderingMode {
         case .monochrome:
@@ -210,52 +172,18 @@ final class IconExporter {
         case .palette:
             colorConfig = .init(paletteColors: [NSColor(configuration.symbolColor)])
         case .multicolor:
-            // Multicolor uses the symbol's built-in colors
             colorConfig = symbolConfig
         }
 
         let finalConfig = symbolConfig.applying(colorConfig)
-        let configuredSymbol = symbolImage.withSymbolConfiguration(finalConfig)
+        guard let configuredSymbol = symbolImage.withSymbolConfiguration(finalConfig) else { return }
 
-        // Calculate symbol drawing rect (centered with offset)
-        let symbolSize = configuredSymbol?.size ?? CGSize(width: pointSize, height: pointSize)
+        let symbolSize = configuredSymbol.size
         let x = (size.width - symbolSize.width) / 2
         let yOffset = configuration.symbolVerticalOffset * size.height
         let y = (size.height - symbolSize.height) / 2 + yOffset
 
-        let symbolRect = CGRect(
-            x: x,
-            y: y,
-            width: symbolSize.width,
-            height: symbolSize.height
-        )
-
-        // Draw the symbol
-        configuredSymbol?.draw(in: symbolRect)
-    }
-
-    // MARK: - Helper Methods
-
-    private func gradientPoints(for angle: Angle, in rect: CGRect) -> (CGPoint, CGPoint) {
-        let radians = angle.radians
-        let x = cos(radians - .pi / 2)
-        let y = sin(radians - .pi / 2)
-
-        let centerX = rect.width / 2
-        let centerY = rect.height / 2
-        let radius = max(rect.width, rect.height)
-
-        let startPoint = CGPoint(
-            x: centerX - x * radius / 2,
-            y: centerY - y * radius / 2
-        )
-
-        let endPoint = CGPoint(
-            x: centerX + x * radius / 2,
-            y: centerY + y * radius / 2
-        )
-
-        return (startPoint, endPoint)
+        configuredSymbol.draw(in: CGRect(x: x, y: y, width: symbolSize.width, height: symbolSize.height))
     }
 
     private func nsWeight(from weight: Font.Weight) -> NSFont.Weight {
@@ -272,35 +200,126 @@ final class IconExporter {
         default: return .regular
         }
     }
+    #endif
 
-    private func savePNG(image: NSImage, to url: URL) -> Bool {
-        print("💾 Saving PNG to: \(url.path)")
-        print("📊 Image size: \(image.size), representations: \(image.representations.count)")
-        
-        // Use the bitmap representation we already created (not cgImage which may be 2x)
-        guard let bitmapRep = image.representations.first as? NSBitmapImageRep else {
-            print("❌ No bitmap representation found in image")
-            print("   Available representations: \(image.representations)")
-            return false
-        }
-        
-        print("📐 Bitmap dimensions: \(bitmapRep.pixelsWide)x\(bitmapRep.pixelsHigh)")
+    // MARK: - iOS/iPadOS/visionOS Rendering
 
-        guard let pngData = bitmapRep.representation(using: .png, properties: [:]) else {
-            print("❌ Failed to create PNG data")
-            return false
+    #if !os(macOS)
+    private func renderIconUIKit(configuration: IconConfiguration, size: CGSize) throws -> Data {
+        let renderer = UIGraphicsImageRenderer(size: size)
+        let pngData = renderer.pngData { context in
+            let cgContext = context.cgContext
+            let rect = CGRect(origin: .zero, size: size)
+            drawBackground(configuration: configuration, in: rect, context: cgContext)
+            drawSymbolUIKit(configuration: configuration, in: rect, size: size)
         }
-        
-        print("✅ PNG data created: \(pngData.count) bytes")
+        return pngData
+    }
 
-        do {
-            try pngData.write(to: url)
-            print("✅ PNG saved successfully")
-            return true
-        } catch {
-            print("❌ Error writing PNG: \(error)")
-            return false
+    private func drawSymbolUIKit(configuration: IconConfiguration, in rect: CGRect, size: CGSize) {
+        guard let symbolImage = UIImage(systemName: configuration.symbolName) else { return }
+
+        let pointSize = size.width * configuration.symbolScale
+        let symbolConfig = UIImage.SymbolConfiguration(
+            pointSize: pointSize,
+            weight: uiWeight(from: configuration.symbolWeight)
+        )
+
+        let colorConfig: UIImage.SymbolConfiguration
+        switch configuration.renderingMode {
+        case .monochrome:
+            colorConfig = .init(paletteColors: [UIColor(configuration.symbolColor)])
+        case .hierarchical:
+            colorConfig = .init(hierarchicalColor: UIColor(configuration.symbolColor))
+        case .palette:
+            colorConfig = .init(paletteColors: [UIColor(configuration.symbolColor)])
+        case .multicolor:
+            colorConfig = symbolConfig
         }
+
+        let finalConfig = symbolConfig.applying(colorConfig)
+        guard let configuredSymbol = symbolImage.withConfiguration(finalConfig) as? UIImage else { return }
+
+        let symbolSize = configuredSymbol.size
+        let x = (size.width - symbolSize.width) / 2
+        let yOffset = configuration.symbolVerticalOffset * size.height
+        let y = (size.height - symbolSize.height) / 2 + yOffset
+
+        configuredSymbol.draw(in: CGRect(x: x, y: y, width: symbolSize.width, height: symbolSize.height))
+    }
+
+    private func uiWeight(from weight: Font.Weight) -> UIImage.SymbolWeight {
+        switch weight {
+        case .ultraLight: return .ultraLight
+        case .thin: return .thin
+        case .light: return .light
+        case .regular: return .regular
+        case .medium: return .medium
+        case .semibold: return .semibold
+        case .bold: return .bold
+        case .heavy: return .heavy
+        case .black: return .black
+        default: return .regular
+        }
+    }
+    #endif
+
+    // MARK: - Shared Drawing (CoreGraphics - platform agnostic)
+
+    private func drawBackground(configuration: IconConfiguration, in rect: CGRect, context: CGContext) {
+        context.saveGState()
+
+        switch configuration.backgroundType {
+        case .solid:
+            #if os(macOS)
+            NSColor(configuration.primaryColor).setFill()
+            #else
+            UIColor(configuration.primaryColor).setFill()
+            #endif
+            context.fill(rect)
+
+        case .gradient:
+            let colorSpace = CGColorSpaceCreateDeviceRGB()
+            let colors = [
+                configuration.primaryColor.cgColor,
+                configuration.secondaryColor.cgColor
+            ] as CFArray
+
+            guard let gradient = CGGradient(colorsSpace: colorSpace, colors: colors, locations: [0.0, 1.0]) else {
+                return
+            }
+
+            let (startPoint, endPoint) = gradientPoints(for: configuration.gradientAngle, in: rect)
+            context.drawLinearGradient(
+                gradient,
+                start: startPoint,
+                end: endPoint,
+                options: [.drawsBeforeStartLocation, .drawsAfterEndLocation]
+            )
+        }
+
+        context.restoreGState()
+    }
+
+    private func gradientPoints(for angle: Angle, in rect: CGRect) -> (CGPoint, CGPoint) {
+        let radians = angle.radians
+        let x = cos(radians - .pi / 2)
+        let y = sin(radians - .pi / 2)
+
+        let centerX = rect.width / 2
+        let centerY = rect.height / 2
+        let radius = max(rect.width, rect.height)
+
+        let startPoint = CGPoint(
+            x: centerX - x * radius / 2,
+            y: centerY - y * radius / 2
+        )
+        let endPoint = CGPoint(
+            x: centerX + x * radius / 2,
+            y: centerY + y * radius / 2
+        )
+
+        return (startPoint, endPoint)
     }
 
     // MARK: - Contents.json Generation
@@ -337,7 +356,6 @@ final class IconExporter {
                 imageEntry["platform"] = platform
             }
 
-            // For non-marketing icons, include scale and size
             if iconSize.idiom != "ios-marketing" && iconSize.idiom != "mac" {
                 imageEntry["scale"] = iconSize.scaleString
                 imageEntry["size"] = iconSize.sizeString
@@ -348,7 +366,6 @@ final class IconExporter {
                 imageEntry["size"] = iconSize.sizeString
             }
 
-            // Convert to JSON string
             let jsonString = imageEntry.map { "      \"\($0.key)\" : \"\($0.value)\"" }
                 .sorted()
                 .joined(separator: ",\n")
@@ -390,6 +407,10 @@ final class IconExporter {
 
 private extension Color {
     var cgColor: CGColor {
+        #if os(macOS)
         NSColor(self).cgColor
+        #else
+        UIColor(self).cgColor
+        #endif
     }
 }

@@ -6,8 +6,12 @@
 //
 
 import SwiftUI
-import AppKit
 import UniformTypeIdentifiers
+#if os(macOS)
+import AppKit
+#else
+import UIKit
+#endif
 
 /// Export options and button
 struct ExportSettingsView: View {
@@ -20,6 +24,11 @@ struct ExportSettingsView: View {
     @State private var errorMessage = ""
     @State private var showSuccessAlert = false
     @State private var exportedPath = ""
+    #if !os(macOS)
+    @State private var showDocumentPicker = false
+    @State private var pendingExportURL: URL?
+    @State private var pendingExportIsIconSet = true
+    #endif
 
     private let exporter = IconExporter()
 
@@ -167,15 +176,44 @@ struct ExportSettingsView: View {
         }
         .alert("Export Successful", isPresented: $showSuccessAlert) {
             Button("OK", role: .cancel) { }
+            #if os(macOS)
             Button("Show in Finder", action: showInFinder)
+            #else
+            Button("Open in Files", action: openInFiles)
+            #endif
         } message: {
             Text("Icon exported to:\n\(exportedPath)")
         }
+        #if !os(macOS)
+        .sheet(isPresented: $showDocumentPicker) {
+            if let url = pendingExportURL {
+                DocumentExporterView(
+                    sourceURL: url,
+                    isIconSet: pendingExportIsIconSet,
+                    onCompletion: { destinationURL in
+                        showDocumentPicker = false
+                        if let dest = destinationURL {
+                            exportedPath = dest.path
+                            showSuccessAlert = true
+                        }
+                        isExporting = false
+                    },
+                    onError: { error in
+                        showDocumentPicker = false
+                        errorMessage = "Export failed: \(error.localizedDescription)"
+                        showError = true
+                        isExporting = false
+                    }
+                )
+            }
+        }
+        #endif
     }
 
     // MARK: - Export Methods
 
     private func exportAppIconSet() {
+        #if os(macOS)
         let savePanel = NSSavePanel()
         savePanel.title = "Export AppIcon Set"
         savePanel.message = "Choose where to save AppIcon.appiconset"
@@ -185,21 +223,14 @@ struct ExportSettingsView: View {
         savePanel.showsTagField = false
 
         savePanel.begin { response in
-            guard response == .OK, let url = savePanel.url else {
-                return
-            }
+            guard response == .OK, let url = savePanel.url else { return }
 
             Task { @MainActor in
                 isExporting = true
-
                 do {
-                    // Remove .appiconset from the URL since exportAppIcon adds it
-                    let destinationURL: URL
-                    if url.lastPathComponent.hasSuffix(".appiconset") {
-                        destinationURL = url.deletingLastPathComponent()
-                    } else {
-                        destinationURL = url
-                    }
+                    let destinationURL = url.lastPathComponent.hasSuffix(".appiconset")
+                        ? url.deletingLastPathComponent()
+                        : url
 
                     try await exporter.exportAppIcon(
                         configuration: viewModel.configuration,
@@ -211,18 +242,39 @@ struct ExportSettingsView: View {
                     isExporting = false
                     exportedPath = destinationURL.appendingPathComponent("AppIcon.appiconset").path
                     showSuccessAlert = true
-
                 } catch {
                     isExporting = false
-                    errorMessage = "Export failed: \(error.localizedDescription)\n\nError: \(error)"
-                    print("Export error: \(error)")
+                    errorMessage = "Export failed: \(error.localizedDescription)"
                     showError = true
                 }
             }
         }
+        #else
+        Task { @MainActor in
+            isExporting = true
+            do {
+                let tempDir = FileManager.default.temporaryDirectory
+                    .appendingPathComponent(UUID().uuidString)
+                try await exporter.exportAppIcon(
+                    configuration: viewModel.configuration,
+                    mode: exportMode,
+                    platforms: selectedPlatforms,
+                    to: tempDir
+                )
+                pendingExportURL = tempDir.appendingPathComponent("AppIcon.appiconset")
+                pendingExportIsIconSet = true
+                showDocumentPicker = true
+            } catch {
+                isExporting = false
+                errorMessage = "Export failed: \(error.localizedDescription)"
+                showError = true
+            }
+        }
+        #endif
     }
 
     private func exportSinglePNG() {
+        #if os(macOS)
         let savePanel = NSSavePanel()
         savePanel.title = "Export PNG"
         savePanel.message = "Choose where to save the icon"
@@ -233,42 +285,109 @@ struct ExportSettingsView: View {
         savePanel.showsTagField = false
 
         savePanel.begin { response in
-            guard response == .OK, let url = savePanel.url else {
-                return
-            }
+            guard response == .OK, let url = savePanel.url else { return }
 
             Task { @MainActor in
                 isExporting = true
-
                 do {
                     try exporter.exportSinglePNG(
                         configuration: viewModel.configuration,
                         to: url
                     )
-
                     isExporting = false
                     exportedPath = url.path
                     showSuccessAlert = true
-
                 } catch {
                     isExporting = false
-                    errorMessage = "Export failed: \(error.localizedDescription)\n\nError: \(error)"
-                    print("Export PNG error: \(error)")
+                    errorMessage = "Export failed: \(error.localizedDescription)"
                     showError = true
                 }
             }
         }
+        #else
+        Task { @MainActor in
+            isExporting = true
+            do {
+                let tempURL = FileManager.default.temporaryDirectory
+                    .appendingPathComponent("AppIcon-1024.png")
+                try exporter.exportSinglePNG(
+                    configuration: viewModel.configuration,
+                    to: tempURL
+                )
+                pendingExportURL = tempURL
+                pendingExportIsIconSet = false
+                showDocumentPicker = true
+            } catch {
+                isExporting = false
+                errorMessage = "Export failed: \(error.localizedDescription)"
+                showError = true
+            }
+        }
+        #endif
     }
 
     private func showInFinder() {
+        #if os(macOS)
         let url = URL(fileURLWithPath: exportedPath)
         NSWorkspace.shared.selectFile(url.path, inFileViewerRootedAtPath: url.deletingLastPathComponent().path)
+        #endif
+    }
+
+    private func openInFiles() {
+        #if !os(macOS)
+        guard let url = URL(string: "shareddocuments://") else { return }
+        UIApplication.shared.open(url)
+        #endif
     }
 }
+
+// MARK: - iOS Document Exporter
+
+#if !os(macOS)
+/// Wraps UIDocumentPickerViewController for exporting files/folders on iOS
+private struct DocumentExporterView: UIViewControllerRepresentable {
+    let sourceURL: URL
+    let isIconSet: Bool
+    let onCompletion: (URL?) -> Void
+    let onError: (Error) -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(onCompletion: onCompletion, onError: onError)
+    }
+
+    func makeUIViewController(context: Context) -> UIDocumentPickerViewController {
+        let picker = UIDocumentPickerViewController(forExporting: [sourceURL], asCopy: true)
+        picker.delegate = context.coordinator
+        return picker
+    }
+
+    func updateUIViewController(_ uiViewController: UIDocumentPickerViewController, context: Context) {}
+
+    class Coordinator: NSObject, UIDocumentPickerDelegate {
+        let onCompletion: (URL?) -> Void
+        let onError: (Error) -> Void
+
+        init(onCompletion: @escaping (URL?) -> Void, onError: @escaping (Error) -> Void) {
+            self.onCompletion = onCompletion
+            self.onError = onError
+        }
+
+        func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
+            onCompletion(urls.first)
+        }
+
+        func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {
+            onCompletion(nil)
+        }
+    }
+}
+#endif
 
 // MARK: - Preview
 
 #Preview {
     ExportSettingsView(viewModel: IconViewModel())
+        #if os(macOS)
         .frame(width: 320, height: 600)
+        #endif
 }
